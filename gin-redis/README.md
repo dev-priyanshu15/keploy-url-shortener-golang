@@ -29,23 +29,98 @@ We need create an alias for Keploy:
 alias keploy='sudo docker run --pull always --name keploy-v2 -p 16789:16789 --privileged --pid=host -it -v $(pwd):$(pwd) -w $(pwd) -v /sys/fs/cgroup:/sys/fs/cgroup -v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf -v /var/run/docker.sock:/var/run/docker.sock -v '"$HOME"'/.keploy-config:/root/.keploy-config -v '"$HOME"'/keploy-config:/root/keploy-config --rm ghcr.io/keploy/keploy'
 ```
 
-### Update the Host
+### Update the Redis Connection Settings
 
-> **Since, we are on the docker image the Redis URL will be myredis:6379 instead of localhost:6379. This needs to be updated in `helpers/redis/redisConnect.go` file**
+> **Important:** When running in Docker, the Redis URL should be `redis:6379` instead of `localhost:6379`. This needs to be updated in `helpers/redis/redisConnect.go` file.
+
+```go
+// Change this:
+Addr: "localhost:6379"
+
+// To this:
+Addr: "redis:6379"
+```
+
+This change is necessary because in Docker, `localhost` points to the container itself, not the Redis service. Docker Compose uses an internal network where each service can be accessed via its container name.
 
 ### Create a Docker network
 ```
 sudo docker network create <networkName>
 ```
 
-### Let's start the Redis Instance
-Using the docker-compose file we will start our Redis instance:-
+### Using Docker Compose
+
+Create a `docker-compose.yml` file with the following content:
+
+```yaml
+version: '3.7'
+services:
+  go-app:
+    build:
+      context: .
+    container_name: ginRedisApp
+    ports:
+      - "3001:3001"
+    environment:
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+    depends_on:
+      - redis
+  redis:
+    image: redis
+    container_name: myredis
+    ports:
+      - "6379:6379"
+```
+
+This setup properly manages the dependency between the Go application and Redis server. 
+
+To start the application using Docker Compose:
+
+```bash
+docker-compose up
+```
+
+### Using individual Docker containers
+
+Alternatively, you can start Redis manually and build the application:
+
 ```bash
 sudo docker run -p 6379:6379 -d --network <networkName> --name myredis redis
-```
-```bash
 docker build -t gin-app:1.0 .
 ```
+
+### Communicating with Dockerized App Natively
+
+If you want to run your application in Docker but interact with it from your host machine or other environments, follow these steps:
+
+#### Option 1: Port Mapping (Already included above)
+
+The Docker Compose and individual container setups both include port mapping (`3001:3001`), which allows you to access the containerized application via `localhost:3001` from your host machine.
+
+#### Option 2: Using Docker's IP Address
+
+Find the Docker container's IP address:
+
+```bash
+docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' ginRedisApp
+```
+
+Then use this IP to communicate with the application:
+
+```bash
+curl --location 'http://<container-ip>:3001/api/getVerificationCode?email=something@gmail.com&username=shivamsourav'
+```
+
+#### Option 3: Docker Host Network (Linux only)
+
+Run your container using the host network:
+
+```bash
+docker run --network host --name ginRedisApp gin-app:1.0
+```
+
+This will make the container share the host's network stack, allowing you to access it via `localhost:3001`.
 
 ### Capture the Testcases
 
@@ -241,3 +316,63 @@ sudo -E keploy test -c "./gin-redis" --delay 10
 This time all the test cases will pass.
 
 ![testruns](./img/testRunPass.png?raw=true "Recent testruns")
+
+## Known Issues and Fixes
+
+### Redis Connectivity Issues in Dockerized Gin Application  
+
+When using Docker, you might face connectivity issues between the Gin application and Redis. Here's how to resolve them:
+
+#### Problem 1: Redis Connection Settings in Go Application  
+**Issue:**  
+The Go application might be configured to connect to Redis using:  
+```go
+Addr: "localhost:6379"
+```  
+This configuration works when running the application locally (without Docker) but fails in a containerized environment.
+
+**Solution:**  
+Update the Redis address in the application code to:  
+```go
+Addr: "redis:6379"
+```  
+Where `redis` matches the service name defined in `docker-compose.yml`.
+
+#### Problem 2: Docker Compose Configuration  
+**Issue:**  
+The Docker Compose setup might not properly manage the dependency between the Go application and the Redis server.
+
+**Solution:**  
+Improve the `docker-compose.yml` to properly manage service dependencies as shown in the Docker Compose section above.
+
+#### Environment-Variable Based Configuration (Recommended)
+
+For a more flexible setup, modify your Go code to use environment variables:
+
+```go
+func RedisConnect() *redis.Client {
+    redisHost := os.Getenv("REDIS_HOST")
+    if redisHost == "" {
+        redisHost = "localhost" // Default fallback
+    }
+    
+    redisPort := os.Getenv("REDIS_PORT")
+    if redisPort == "" {
+        redisPort = "6379" // Default fallback
+    }
+    
+    rdb := redis.NewClient(&redis.Options{
+        Addr: redisHost + ":" + redisPort,
+        Password: "",
+        DB: 0,
+    })
+    
+    return rdb
+}
+```
+
+This way, you can easily configure the Redis connection for different environments without changing the code.
+
+**Future Improvements:**  
+- Implement retry logic in the Go application to handle situations where Redis is not immediately available.
+- Add health checks to the Docker Compose file to ensure Redis is fully initialized before starting the Go application.
